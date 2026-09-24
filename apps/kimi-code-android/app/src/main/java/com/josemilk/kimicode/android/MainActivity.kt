@@ -5,18 +5,23 @@ import android.os.Bundle
 import android.view.Gravity
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
+import com.josemilk.kimicode.android.agent.AgentEvent
+import com.josemilk.kimicode.android.agent.KimiAgentCore
+import com.josemilk.kimicode.android.agent.ToolRequest
+import kotlinx.coroutines.launch
 import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
     private lateinit var root: LinearLayout
     private lateinit var transcript: TextView
     private lateinit var composer: EditText
-    private lateinit var api: KimiApi
+    private lateinit var agent: KimiAgentCore
     private var language = "en"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        api = KimiApi(this)
+        agent = KimiAgentCore(this, filesDir.resolve("workspace"))
         language = getPreferences(0).getString("language", Locale.getDefault().language)?.let { if (it == "es") "es" else "en" } ?: "en"
         buildUi()
     }
@@ -30,34 +35,86 @@ class MainActivity : AppCompatActivity() {
         header.addView(settings)
         root.addView(header)
 
-        val workspace = TextView(this).apply { text = if (language == "es") "  Workspace · Sesión nueva" else "  Workspace · New session"; textSize = 14f; setPadding(0, 18, 0, 18) }
+        val workspace = TextView(this).apply {
+            text = if (language == "es") "  Workspace · Sesión nueva" else "  Workspace · New session"
+            textSize = 14f; setPadding(0, 18, 0, 18)
+        }
         root.addView(workspace)
-        transcript = TextView(this).apply { textSize = 15f; setPadding(8, 12, 8, 12); text = if (language == "es") "Describe una tarea para comenzar." else "Describe a task to get started." }
+        transcript = TextView(this).apply {
+            textSize = 15f; setPadding(8, 12, 8, 12)
+            text = if (language == "es") "Describe una tarea para comenzar." else "Describe a task to get started."
+        }
         root.addView(ScrollView(this).apply { addView(transcript) }, LinearLayout.LayoutParams(-1, 0, 1f))
-        composer = EditText(this).apply { hint = if (language == "es") "Escribe una tarea…" else "Describe a task…"; minLines = 3; gravity = Gravity.TOP }
+        composer = EditText(this).apply {
+            hint = if (language == "es") "Escribe una tarea…" else "Describe a task…"
+            minLines = 3; gravity = Gravity.TOP
+        }
         root.addView(composer)
-        val send = Button(this).apply { text = if (language == "es") "Enviar" else "Send"; setOnClickListener { sendTask() } }
+        val send = Button(this).apply {
+            text = if (language == "es") "Enviar" else "Send"
+            setOnClickListener { sendTask() }
+        }
         root.addView(send)
         setContentView(root)
     }
 
     private fun sendTask() {
-        val text = composer.text.toString().trim(); if (text.isEmpty()) return
-        if (!api.hasApiKey()) { apiKeyDialog(); return }
+        val text = composer.text.toString().trim()
+        if (text.isEmpty()) return
+        if (!agent.hasApiKey()) { apiKeyDialog(); return }
         transcript.text = "You: $text\n\nKimi: …"
         composer.setText("")
-        api.chat(text, { answer -> transcript.text = "You: $text\n\nKimi:\n$answer" }, {}, { e -> transcript.text = "Error: $e" })
+        lifecycleScope.launch {
+            try {
+                agent.run(text) { event ->
+                    when (event) {
+                        is AgentEvent.TextDelta -> runOnUiThread { transcript.text = "You: $text\n\nKimi:\n${event.text}" }
+                        is AgentEvent.ToolCall -> runOnUiThread { transcript.append("\n\n[Tool: ${event.request.name}]") }
+                        is AgentEvent.ApprovalRequired -> requestApproval(event.request)
+                        is AgentEvent.ToolFinished -> runOnUiThread { transcript.append("\n[Tool result received]") }
+                        is AgentEvent.Error -> runOnUiThread { transcript.append("\n\nError: ${event.message}") }
+                        AgentEvent.Completed -> Unit
+                    }
+                }
+            } catch (t: Throwable) {
+                runOnUiThread { transcript.text = "Error: ${t.message ?: "Unknown error"}" }
+            }
+        }
+    }
+
+    private fun requestApproval(request: ToolRequest) {
+        runOnUiThread {
+            AlertDialog.Builder(this)
+                .setTitle(if (language == "es") "Aprobación requerida" else "Approval required")
+                .setMessage("${request.name}\n\n${request.arguments}")
+                .setNegativeButton(if (language == "es") "Denegar" else "Deny") { _, _ ->
+                    lifecycleScope.launch { agent.pendingApprovalManager().deny(request.id) }
+                }
+                .setPositiveButton(if (language == "es") "Aprobar" else "Approve") { _, _ ->
+                    lifecycleScope.launch { agent.pendingApprovalManager().approve(request.id) }
+                }.show()
+        }
     }
 
     private fun apiKeyDialog() {
-        val input = EditText(this); input.inputType = 129; input.hint = "Kimi API key"
-        AlertDialog.Builder(this).setTitle(if (language == "es") "Conectar Kimi" else "Connect Kimi").setMessage(if (language == "es") "Introduce tu clave oficial de Kimi Code." else "Enter your official Kimi Code API key.").setView(input).setNegativeButton(if (language == "es") "Cancelar" else "Cancel", null).setPositiveButton("OK") { _, _ -> api.setApiKey(input.text.toString()) }.show()
+        val input = EditText(this).apply { inputType = 129; hint = "Kimi API key" }
+        AlertDialog.Builder(this)
+            .setTitle(if (language == "es") "Conectar Kimi" else "Connect Kimi")
+            .setMessage(if (language == "es") "Introduce tu clave oficial de Kimi Code." else "Enter your official Kimi Code API key.")
+            .setView(input)
+            .setNegativeButton(if (language == "es") "Cancelar" else "Cancel", null)
+            .setPositiveButton("OK") { _, _ -> agent.setApiKey(input.text.toString()) }
+            .show()
     }
 
     private fun settingsDialog() {
         val options = arrayOf("English", "Español")
-        AlertDialog.Builder(this).setTitle(if (language == "es") "Idioma" else "Language").setItems(options) { _, which ->
-            language = if (which == 1) "es" else "en"; getPreferences(0).edit().putString("language", language).apply(); buildUi()
-        }.show()
+        AlertDialog.Builder(this)
+            .setTitle(if (language == "es") "Idioma" else "Language")
+            .setItems(options) { _, which ->
+                language = if (which == 1) "es" else "en"
+                getPreferences(0).edit().putString("language", language).apply()
+                buildUi()
+            }.show()
     }
 }
