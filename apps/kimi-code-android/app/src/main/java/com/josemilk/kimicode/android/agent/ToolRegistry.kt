@@ -3,6 +3,9 @@ package com.josemilk.kimicode.android.agent
 interface AgentTool {
     val name: String
     val description: String
+    /** JSON Schema used when exposing this tool to the Kimi tool-calling API. */
+    val parametersSchema: String
+        get() = "{\"type\":\"object\",\"properties\":{}}"
     suspend fun execute(arguments: String): ToolResult
 }
 
