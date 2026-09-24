@@ -10,14 +10,17 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.UUID
 
-/** Android-compatible agent loop mirroring the core concepts used by Kimi Code:
- * sessions, tool registry, approval gates and iterative tool execution.
- * The model remains the official Kimi Code endpoint.
+/**
+ * Android implementation of the Kimi Code agent loop.
+ * It keeps Kimi as the model/service while adapting tools, permissions, skills,
+ * sessions and workspace operations to Android's sandbox.
  */
-class KimiAgentCore(context: Context, workspace: File) {
+class KimiAgentCore(private val context: Context, workspace: File) {
     private val prefs = context.getSharedPreferences("kimi", Context.MODE_PRIVATE)
     private val tools = ToolRegistry()
     private val approvals = ApprovalManager()
+    private val permissions = PermissionManager(context)
+    private val skills = SkillManager(workspace)
     private val workspaceRoot = workspace.canonicalFile
     private val baseUrl = "https://api.kimi.com/coding/v1/chat/completions"
 
@@ -26,20 +29,26 @@ class KimiAgentCore(context: Context, workspace: File) {
         tools.register(ReadFileTool(workspaceRoot))
         tools.register(ListFilesTool(workspaceRoot))
         tools.register(WebFetchTool())
+        tools.register(TerminalTool(workspaceRoot, permissions))
+        tools.register(GitTool(workspaceRoot, permissions))
     }
 
     fun setApiKey(key: String) = prefs.edit().putString("api_key", key.trim()).apply()
     fun hasApiKey() = !prefs.getString("api_key", null).isNullOrBlank()
     fun pendingApprovalManager(): ApprovalManager = approvals
+    fun permissionManager(): PermissionManager = permissions
+    fun skillManager(): SkillManager = skills
 
     suspend fun run(prompt: String, emit: suspend (AgentEvent) -> Unit): String = withContext(Dispatchers.IO) {
         val key = prefs.getString("api_key", null).orEmpty()
         require(key.isNotBlank()) { "Kimi API key is not configured" }
-        val messages = JSONArray().apply {
-            put(JSONObject().put("role", "user").put("content", prompt))
-        }
+        val messages = JSONArray()
+        val skillPrompt = skills.systemPromptAddition()
+        val system = "You are Kimi Code running in the Android workspace. Respect tool permissions and user approvals.\n" + skillPrompt
+        messages.put(JSONObject().put("role", "system").put("content", system))
+        messages.put(JSONObject().put("role", "user").put("content", prompt))
         var finalText = ""
-        repeat(8) {
+        repeat(16) {
             val response = request(key, messages)
             val message = response.getJSONArray("choices").getJSONObject(0).getJSONObject("message")
             val content = message.optString("content")
@@ -102,15 +111,15 @@ class KimiAgentCore(context: Context, workspace: File) {
 
     private fun toolDefinitions(): JSONArray = JSONArray().also { array ->
         tools.all().forEach { tool ->
-            val parameters = when (tool.name) {
-                "read_file" -> JSONObject().put("type", "object").put("properties", JSONObject().put("path", JSONObject().put("type", "string"))).put("required", JSONArray().put("path"))
-                "list_files" -> JSONObject().put("type", "object").put("properties", JSONObject().put("path", JSONObject().put("type", "string")))
-                "web_fetch" -> JSONObject().put("type", "object").put("properties", JSONObject().put("url", JSONObject().put("type", "string"))).put("required", JSONArray().put("url"))
-                else -> JSONObject().put("type", "object")
-            }
-            array.put(JSONObject().put("type", "function").put("function", JSONObject().put("name", tool.name).put("description", tool.description).put("parameters", parameters)))
+            array.put(JSONObject().put("type", "function").put("function", JSONObject()
+                .put("name", tool.name)
+                .put("description", tool.description)
+                .put("parameters", JSONObject(tool.parametersSchema))))
         }
     }
 
-    private fun toolMessage(result: ToolResult) = JSONObject().put("role", "tool").put("tool_call_id", result.id).put("content", result.output)
+    private fun toolMessage(result: ToolResult) = JSONObject()
+        .put("role", "tool")
+        .put("tool_call_id", result.id)
+        .put("content", result.output)
 }
