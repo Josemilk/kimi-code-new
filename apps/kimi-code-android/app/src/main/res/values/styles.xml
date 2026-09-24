@@ -1,0 +1,1 @@
+<resources><style name="Theme.KimiCode" parent="Theme.Material3.DayNight.NoActionBar"><item name="android:fontFamily">sans</item><item name="android:windowLightStatusBar">false</item><item name="android:colorAccent">#6C63FF</item></style></resources>
