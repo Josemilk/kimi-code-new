@@ -25,11 +25,35 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # Do not request the removed legacy "tools" SDK package here.
+      # ubuntu-latest already provides sdkmanager; setup-android installs
+      # the current command-line tools and prepares ANDROID_HOME.
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: '12266719'
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: true
 
-      - name: Install Android 10 SDK
-        run: sdkmanager 'platforms;android-29' 'platforms;android-36' 'build-tools;35.0.0'
+      - name: Accept Android SDK licenses and install required packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            'platform-tools' \
+            'platforms;android-29' \
+            'platforms;android-36' \
+            'build-tools;35.0.0'
+
+      - name: Verify Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d "${ANDROID_HOME}/platforms/android-29"
+          test -d "${ANDROID_HOME}/platforms/android-36"
+          test -d "${ANDROID_HOME}/build-tools/35.0.0"
+          sdkmanager --list_installed | grep -E 'platforms;android-(29|36)|build-tools;35.0.0|platform-tools'
 
       - name: Set up Gradle 8.13
         uses: gradle/actions/setup-gradle@v4
@@ -39,6 +63,15 @@ jobs:
       - name: Build debug and release APKs
         working-directory: apps/kimi-code-android
         run: gradle --no-daemon clean assembleDebug assembleRelease
+
+      - name: Verify APK outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -lh apps/kimi-code-android/app/build/outputs/apk/debug/
+          ls -lh apps/kimi-code-android/app/build/outputs/apk/release/
+          test -f apps/kimi-code-android/app/build/outputs/apk/debug/app-debug.apk
+          test -f apps/kimi-code-android/app/build/outputs/apk/release/app-release-unsigned.apk
 
       - name: Upload Android APKs (15 days)
         uses: actions/upload-artifact@v4
